@@ -44,8 +44,11 @@ class Model(object):
         self.optimizer.step()
         return loss.detach().cpu().numpy()
 
-    def test(self, frames, mask):
+    def test(self, frames, mask=None):
         frames_tensor = torch.FloatTensor(frames).to(self.configs.device)
-        mask_tensor = torch.FloatTensor(mask).to(self.configs.device)
-        next_frames, _ = self.network(frames_tensor, mask_tensor)
+        if mask is not None:
+            mask_tensor = torch.FloatTensor(mask).to(self.configs.device)
+            next_frames, _ = self.network(frames_tensor, mask_tensor)
+        else:
+            next_frames, _ = self.network(frames_tensor, None, False)
         return next_frames.detach().cpu().numpy()

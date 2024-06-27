@@ -36,10 +36,12 @@ class RNN(nn.Module):
         adapter_num_hidden = num_hidden[0]
         self.adapter = nn.Conv2d(adapter_num_hidden, adapter_num_hidden, 1, stride=1, padding=0, bias=False)
 
-    def forward(self, frames_tensor, mask_true):
+    def forward(self, frames_tensor, mask_true, mask_needed = True):
         # [batch, length, height, width, channel] -> [batch, length, channel, height, width]
         frames = frames_tensor.permute(0, 1, 4, 2, 3).contiguous()
-        mask_true = mask_true.permute(0, 1, 4, 2, 3).contiguous()
+
+        if mask_needed:
+            mask_true = mask_true.permute(0, 1, 4, 2, 3).contiguous()
 
         batch = frames.shape[0]
         height = frames.shape[3]
@@ -75,7 +77,7 @@ class RNN(nn.Module):
                     net = mask_true[:, t - 1] * frames[:, t] + (1 - mask_true[:, t - 1]) * x_gen
             else:
                 # schedule sampling
-                if t < self.configs.input_length:
+                if t < self.configs.input_length or mask_needed is False:
                     net = frames[:, t]
                 else:
                     net = mask_true[:, t - self.configs.input_length] * frames[:, t] + \

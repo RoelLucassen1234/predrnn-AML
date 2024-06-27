@@ -1,10 +1,13 @@
-__author__ = 'yunbo'
+__author__ = 'Roel Lucassen'
 
 import os
 import shutil
 import argparse
 import numpy as np
 import math
+
+import torch
+
 from core.data_provider import datasets_factory
 from core.models.model_factory import Model
 from core.utils import preprocess
@@ -38,8 +41,11 @@ parser.add_argument('--patch_size', type=int, default=4)
 parser.add_argument('--layer_norm', type=int, default=1)
 parser.add_argument('--decouple_beta', type=float, default=0.1)
 
+#entropy scheduled sampling
+parser.add_argument('--entroy_scheduled_sampling', type=int, default=1)
+
 # reverse scheduled sampling
-parser.add_argument('--reverse_scheduled_sampling', type=int, default=0)
+parser.add_argument('--reverse_scheduled_sampling', type=int, default=1)
 parser.add_argument('--r_sampling_step_1', type=float, default=25000)
 parser.add_argument('--r_sampling_step_2', type=int, default=50000)
 parser.add_argument('--r_exp_alpha', type=int, default=5000)
@@ -53,10 +59,10 @@ parser.add_argument('--sampling_changing_rate', type=float, default=0.00002)
 parser.add_argument('--lr', type=float, default=0.001)
 parser.add_argument('--reverse_input', type=int, default=1)
 parser.add_argument('--batch_size', type=int, default=8)
-parser.add_argument('--max_iterations', type=int, default=80000)
-parser.add_argument('--display_interval', type=int, default=100)
-parser.add_argument('--test_interval', type=int, default=5000)
-parser.add_argument('--snapshot_interval', type=int, default=5000)
+parser.add_argument('--max_iterations', type=int, default=100)
+parser.add_argument('--display_interval', type=int, default=5)
+parser.add_argument('--test_interval', type=int, default=50)
+parser.add_argument('--snapshot_interval', type=int, default=10)
 parser.add_argument('--num_save_samples', type=int, default=10)
 parser.add_argument('--n_gpu', type=int, default=1)
 
@@ -167,34 +173,104 @@ def schedule_sampling(eta, itr):
     return eta, real_input_flag
 
 
+def entropy_to_probability(entropy, threshold=0.5):
+    """
+    Map entropy values to a probability of using ground-truth data.
+
+    Args:
+    - entropy (np.ndarray): Entropy values (batch_size, seq_len, height, width).
+    - threshold (float): Entropy threshold for mapping.
+
+    Returns:
+    - probability (np.ndarray): Probability of using ground-truth data (batch_size, seq_len, height, width).
+    """
+    probability = np.exp(-entropy)  # Example: Simple exponential decay based on entropy
+    probability = np.clip(probability, 0.0, 1.0)  # Clip probability to ensure valid range
+
+    # Thresholding based on entropy values
+    probability[entropy > threshold] = 0  # High confidence in ground-truth data
+    probability[entropy <= threshold] = 1 # Low confidence in ground-truth data
+    return probability
+
+def calculate_entropy(predictions):
+    """
+    Calculate entropy of the model's predictions.
+
+    Args:
+    - predictions (np.ndarray): Predicted frames (batch_size, seq_len, channels, height, width).
+
+    Returns:
+    - entropy (np.ndarray): Entropy for each pixel in each frame of the sequence (batch_size, seq_len, height, width).
+    """
+    predictions_tensor = torch.tensor(predictions)
+
+    entropy = -torch.sum(predictions_tensor * torch.log(predictions_tensor +  1e-9), axis=-1)  # Compute entropy
+    return entropy
+
+def generate_sampling_mask(probability):
+    """
+    Generate sampling mask based on the given probability.
+
+    Args:
+    - probability (torch.Tensor): Probability of using ground-truth data (batch_size, seq_len, height, width).
+
+    Returns:
+    - sampling_mask (torch.Tensor): Mask indicating whether to use ground-truth data (batch_size, seq_len, height, width).
+    """
+    random_values = torch.rand(probability.shape).to(args.device)  # Generate random values
+    sampling_mask = random_values < probability  # Compare with probability to create mask
+    return sampling_mask
+
 def train_wrapper(model):
     if args.pretrained_model:
+        print(f"Loading pre-trained model: {args.pretrained_model}")
         model.load(args.pretrained_model)
     # load data
     train_input_handle, test_input_handle = datasets_factory.data_provider(
         args.dataset_name, args.train_data_paths, args.valid_data_paths, args.batch_size, args.img_width,
         seq_length=args.total_length, injection_action=args.injection_action, is_training=True)
-
+    print(f"Loading input data")
     eta = args.sampling_start_value
 
     for itr in range(1, args.max_iterations + 1):
+        print(f"Iteration {itr}")
         if train_input_handle.no_batch_left():
+            print(f"*** No batches left")
             train_input_handle.begin(do_shuffle=True)
+
         ims = train_input_handle.get_batch()
+        print(f"*** Get Batch")
         ims = preprocess.reshape_patch(ims, args.patch_size)
+        print(f"*** Reshape batch")
+
+        if args.entroy_scheduled_sampling == 1:
+            # Make a prediction
+            print("Prediction using Entropy")
+            prediction = model.test(ims, None)
+            entropy = calculate_entropy(prediction)
+            real_input_flag = entropy_to_probability(entropy)
+            # real_input_flag = generate_sampling_mask(entropy_prob)
+            # print(real_input_flag)
 
         if args.reverse_scheduled_sampling == 1:
             real_input_flag = reserve_schedule_sampling_exp(itr)
+            # print(real_input_flag)
+            print(f"*** Apply Reversche schedule sampling")
         else:
             eta, real_input_flag = schedule_sampling(eta, itr)
+            print(f"*** Apply normal schedule sampling")
+
 
         trainer.train(model, ims, real_input_flag, args, itr)
+        print(f"*** Training Model")
 
         if itr % args.snapshot_interval == 0:
             model.save(itr)
+            print(f"*** Saving Model")
 
         if itr % args.test_interval == 0:
             trainer.test(model, test_input_handle, args, itr)
+            print(f"*** Testing Model")
 
         train_input_handle.next()
 
@@ -208,18 +284,23 @@ def test_wrapper(model):
 
 
 if os.path.exists(args.save_dir):
+    print(f"remove following directory: {args.save_dir}")
     shutil.rmtree(args.save_dir)
 os.makedirs(args.save_dir)
+print(f"maing following directory: {args.save_dir}")
 
 if os.path.exists(args.gen_frm_dir):
+    print(f"removing following directory: {args.gen_frm_dir}")
     shutil.rmtree(args.gen_frm_dir)
 os.makedirs(args.gen_frm_dir)
+print(f"Making following directory: {args.gen_frm_dir}")
 
 print('Initializing models')
 
 model = Model(args)
 
 if args.is_training:
+    print("Training Model")
     train_wrapper(model)
 else:
     test_wrapper(model)
