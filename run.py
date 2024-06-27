@@ -190,6 +190,13 @@ def entropy_to_probability(entropy, threshold=0.5):
     # Thresholding based on entropy values
     probability[entropy > threshold] = 0  # High confidence in ground-truth data
     probability[entropy <= threshold] = 1 # Low confidence in ground-truth data
+
+    real_input_flag = np.reshape(probability,
+                                 (args.batch_size,
+                                  args.total_length - args.input_length - 1,
+                                  args.img_width // args.patch_size,
+                                  args.img_width // args.patch_size,
+                                  args.patch_size ** 2 * args.img_channel))
     return probability
 
 def calculate_entropy(predictions):
@@ -249,10 +256,8 @@ def train_wrapper(model):
             prediction = model.test(ims, None)
             entropy = calculate_entropy(prediction)
             real_input_flag = entropy_to_probability(entropy)
-            # real_input_flag = generate_sampling_mask(entropy_prob)
-            # print(real_input_flag)
 
-        if args.reverse_scheduled_sampling == 1:
+        elif args.reverse_scheduled_sampling == 1:
             real_input_flag = reserve_schedule_sampling_exp(itr)
             # print(real_input_flag)
             print(f"*** Apply Reversche schedule sampling")
