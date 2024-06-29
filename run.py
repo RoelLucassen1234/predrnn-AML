@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser(description='PyTorch video prediction model - P
 
 # training/test
 parser.add_argument('--is_training', type=int, default=1)
-parser.add_argument('--device', type=str, default='cpu:0')
+parser.add_argument('--device', type=str, default='cuda:0')
 
 # data
 parser.add_argument('--dataset_name', type=str, default='mnist')
@@ -32,7 +32,7 @@ parser.add_argument('--img_width', type=int, default=64)
 parser.add_argument('--img_channel', type=int, default=1)
 
 # model
-parser.add_argument('--model_name', type=str, default='predrnn')
+parser.add_argument('--model_name', type=str, default='predrnn_v2')
 parser.add_argument('--pretrained_model', type=str, default='')
 parser.add_argument('--num_hidden', type=str, default='64,64,64,64')
 parser.add_argument('--filter_size', type=int, default=5)
@@ -45,7 +45,7 @@ parser.add_argument('--decouple_beta', type=float, default=0.1)
 parser.add_argument('--entroy_scheduled_sampling', type=int, default=1)
 
 # reverse scheduled sampling
-parser.add_argument('--reverse_scheduled_sampling', type=int, default=1)
+parser.add_argument('--reverse_scheduled_sampling', type=int, default=0)
 parser.add_argument('--r_sampling_step_1', type=float, default=25000)
 parser.add_argument('--r_sampling_step_2', type=int, default=50000)
 parser.add_argument('--r_exp_alpha', type=int, default=5000)
@@ -59,10 +59,10 @@ parser.add_argument('--sampling_changing_rate', type=float, default=0.00002)
 parser.add_argument('--lr', type=float, default=0.001)
 parser.add_argument('--reverse_input', type=int, default=1)
 parser.add_argument('--batch_size', type=int, default=8)
-parser.add_argument('--max_iterations', type=int, default=100)
-parser.add_argument('--display_interval', type=int, default=5)
-parser.add_argument('--test_interval', type=int, default=50)
-parser.add_argument('--snapshot_interval', type=int, default=10)
+parser.add_argument('--max_iterations', type=int, default=80000)
+parser.add_argument('--display_interval', type=int, default=1000)
+parser.add_argument('--test_interval', type=int, default=100000)
+parser.add_argument('--snapshot_interval', type=int, default=8000)
 parser.add_argument('--num_save_samples', type=int, default=10)
 parser.add_argument('--n_gpu', type=int, default=1)
 
@@ -131,6 +131,7 @@ def reserve_schedule_sampling_exp(itr):
                                   args.img_width // args.patch_size,
                                   args.img_width // args.patch_size,
                                   args.patch_size ** 2 * args.img_channel))
+    print(f"real_input_flag.shape: {real_input_flag.shape}")
     return real_input_flag
 
 
@@ -174,59 +175,71 @@ def schedule_sampling(eta, itr):
 
 
 def entropy_to_probability(entropy, threshold=0.5):
-    """
-    Map entropy values to a probability of using ground-truth data.
 
-    Args:
-    - entropy (np.ndarray): Entropy values (batch_size, seq_len, height, width).
-    - threshold (float): Entropy threshold for mapping.
-
-    Returns:
-    - probability (np.ndarray): Probability of using ground-truth data (batch_size, seq_len, height, width).
-    """
-    probability = np.exp(-entropy)  # Example: Simple exponential decay based on entropy
+    probability = np.exp(-entropy)  # Simple exponential decay based on entropy
     probability = np.clip(probability, 0.0, 1.0)  # Clip probability to ensure valid range
-
-    # Thresholding based on entropy values
-    probability[entropy > threshold] = 0  # High confidence in ground-truth data
-    probability[entropy <= threshold] = 1 # Low confidence in ground-truth data
-
-    real_input_flag = np.reshape(probability,
-                                 (args.batch_size,
-                                  args.total_length - args.input_length - 1,
-                                  args.img_width // args.patch_size,
-                                  args.img_width // args.patch_size,
-                                  args.patch_size ** 2 * args.img_channel))
+    probability[entropy > threshold] = 0  # Apply threshold
     return probability
 
-def calculate_entropy(predictions):
-    """
-    Calculate entropy of the model's predictions.
 
-    Args:
-    - predictions (np.ndarray): Predicted frames (batch_size, seq_len, channels, height, width).
-
-    Returns:
-    - entropy (np.ndarray): Entropy for each pixel in each frame of the sequence (batch_size, seq_len, height, width).
-    """
-    predictions_tensor = torch.tensor(predictions)
-
-    entropy = -torch.sum(predictions_tensor * torch.log(predictions_tensor +  1e-9), axis=-1)  # Compute entropy
-    return entropy
-
-def generate_sampling_mask(probability):
+def generate_sampling_mask(predictions, threshold=0.5):
     """
     Generate sampling mask based on the given probability.
 
     Args:
-    - probability (torch.Tensor): Probability of using ground-truth data (batch_size, seq_len, height, width).
+    - predictions (torch.Tensor or np.ndarray): Predictions or entropy values (batch_size, seq_len, height, width).
+    - threshold (float): Threshold value for sampling mask.
 
     Returns:
     - sampling_mask (torch.Tensor): Mask indicating whether to use ground-truth data (batch_size, seq_len, height, width).
     """
-    random_values = torch.rand(probability.shape).to(args.device)  # Generate random values
-    sampling_mask = random_values < probability  # Compare with probability to create mask
+    if isinstance(predictions, np.ndarray):
+        predictions = torch.tensor(predictions, dtype=torch.float32)  # Convert to torch tensor if numpy array
+
+    # print(f"predictions.shape: {predictions.shape}")
+
+    entropy = compute_entropy(predictions)  # Compute entropy
+    # print(f"entropy.shape: {entropy.shape}")
+
+    # entropy_prob = entropy_to_probability(entropy, threshold)  # Map entropy to probability
+    # print(f"entropy_prob.shape: {entropy_prob.shape}")
+
+    # # Convert entropy_prob to torch tensor and ensure it's on the same device as predictions
+    # entropy_prob_tensor = torch.tensor(entropy_prob, dtype=torch.float32).to(predictions.device)
+    #
+    # # entropy = compute_entropy(predictions)  # Compute entropy
+
+    probability = np.exp(-entropy)  # Simple exponential decay based on entropy
+    probability = np.clip(probability, 0.0, 1.0)  # Clip probability to ensure valid range
+    probability[entropy > threshold] = 0  # Apply threshold
+    probability[entropy < threshold] = 1
+
+    # Ensure the sampling mask has the correct shape
+    sampling_mask = np.expand_dims(probability, axis=-1)  # Add channel dimension
+    sampling_mask = np.tile(sampling_mask, (1, 1, 1, 1, predictions.shape[-1]))
+
     return sampling_mask
+
+
+def compute_entropy(predictions):
+    """
+    Compute the entropy of the predictions.
+
+    Args:
+    - predictions (torch.Tensor): Predictions of shape (batch_size, seq_len, height, width, channels).
+
+    Returns:
+    - entropy (np.ndarray): Entropy values of shape (batch_size, seq_len, height, width).
+    """
+    # Ensure predictions is a numpy array
+    if isinstance(predictions, torch.Tensor):
+        predictions = predictions.detach().cpu().numpy()
+
+    # Ensure probabilities are normalized
+    predictions = np.clip(predictions, 1e-9, 1.0)  # Avoid log(0)
+    entropy = -np.sum(predictions * np.log(predictions), axis=-1)  # Compute entropy along the channel dimension
+
+    return entropy
 
 def train_wrapper(model):
     if args.pretrained_model:
@@ -242,24 +255,29 @@ def train_wrapper(model):
     for itr in range(1, args.max_iterations + 1):
         print(f"Iteration {itr}")
         if train_input_handle.no_batch_left():
-            print(f"*** No batches left")
+            # print(f"*** No batches left")
             train_input_handle.begin(do_shuffle=True)
 
         ims = train_input_handle.get_batch()
-        print(f"*** Get Batch")
+        # print(f"*** Get Batch")
         ims = preprocess.reshape_patch(ims, args.patch_size)
-        print(f"*** Reshape batch")
+        # print(f"*** Reshape batch")
 
         if args.entroy_scheduled_sampling == 1:
             # Make a prediction
-            print("Prediction using Entropy")
+            # print("Prediction using Entropy")
+            # print(f"img: {ims.shape}")
             prediction = model.test(ims, None)
-            entropy = calculate_entropy(prediction)
-            real_input_flag = entropy_to_probability(entropy)
+            # print(f"pred: {prediction.shape}")
+            real_input_flag = generate_sampling_mask(prediction)
+            # print(real_input_flag)
+            # print(f"mask: {real_input_flag.shape}")
+
+
 
         elif args.reverse_scheduled_sampling == 1:
             real_input_flag = reserve_schedule_sampling_exp(itr)
-            # print(real_input_flag)
+
             print(f"*** Apply Reversche schedule sampling")
         else:
             eta, real_input_flag = schedule_sampling(eta, itr)
@@ -267,7 +285,7 @@ def train_wrapper(model):
 
 
         trainer.train(model, ims, real_input_flag, args, itr)
-        print(f"*** Training Model")
+        # print(f"*** Training Model")
 
         if itr % args.snapshot_interval == 0:
             model.save(itr)

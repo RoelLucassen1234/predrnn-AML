@@ -28,10 +28,12 @@ class RNN(nn.Module):
         self.conv_last = nn.Conv2d(num_hidden[num_layers - 1], self.frame_channel,
                                    kernel_size=1, stride=1, padding=0, bias=False)
 
-    def forward(self, frames_tensor, mask_true, mask_needed = True):
+    def forward(self, frames_tensor, mask_true, mask_needed= True):
         # [batch, length, height, width, channel] -> [batch, length, channel, height, width]
         frames = frames_tensor.permute(0, 1, 4, 2, 3).contiguous()
+        # print(frames_tensor.shape)
         if mask_needed:
+            # print(mask_true.shape)
             mask_true = mask_true.permute(0, 1, 4, 2, 3).contiguous()
 
         batch = frames.shape[0]
@@ -51,7 +53,7 @@ class RNN(nn.Module):
 
         for t in range(self.configs.total_length - 1):
             # reverse schedule sampling
-            if self.configs.reverse_scheduled_sampling == 1 and mask_needed:
+            if self.configs.reverse_scheduled_sampling == 1:
                 if t == 0:
                     net = frames[:, t]
                 else:

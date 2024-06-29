@@ -101,8 +101,16 @@ def test(model, test_input_handle, configs, itr):
             real_frm = np.uint8(x * 255)
             pred_frm = np.uint8(gx * 255)
 
+            # if pred_frm.shape[1] < 7 or pred_frm.shape[2] < 7:
+            #     print(pred_frm.shape[1])
+            #     print(pred_frm.shape[2])
+
             psnr[i] += metrics.batch_psnr(pred_frm, real_frm)
             for b in range(configs.batch_size):
+                # if np.any((np.asarray(real_frm.shape) - 7) < 0):
+                #     print((np.asarray(real_frm.shape) - 7))
+                # print(f"shape: {pred_frm[b]}")
+                # print(f"real_shape: {real_frm[b]}")
                 score, _ = compare_ssim(pred_frm[b], real_frm[b], full=True, multichannel=True)
                 ssim[i] += score
 
